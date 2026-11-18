@@ -12,3 +12,6 @@ emit = "go"
 
 [lint]
 allow = ["FLICK-T055"]
+
+[tools]
+"flick/go" = ["go"]

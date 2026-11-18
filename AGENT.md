@@ -14,6 +14,8 @@ flick test --project . --emit go    # 15 tests
 The compiler must be built from the same `flick-lang` checkout as
 `packages/std`. A compiler older than `std` fails with `FLICK-P043`; run
 `cargo install --path flick --force` in that checkout, not a released tag.
+The Go target needs `go` on `PATH` and the grant in `flick.toml`:
+`[tools] "flick/go" = ["go"]` (without it the build fails with `FLICK-P029`).
 
 ## Where code goes
 
