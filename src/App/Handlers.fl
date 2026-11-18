@@ -1,0 +1,137 @@
+/// The work behind the commands: loading `std.lsp`, evaluating an expression
+/// or files, and the REPL.
+module App.Handlers exposing (run, repl)
+
+import File
+import Lishp.Eval exposing (..)
+import Lishp.Parser exposing (Incomplete, Invalid, parse_all)
+import Lishp.Value exposing (..)
+import Terminal
+
+/// Where `std.lsp` may be: `LISHP_STD_PATH`, the working directory, the home
+/// directory.
+std_candidates : Unit ->{Host.Environment} List String
+let std_candidates () =
+  match Platform.env "LISHP_STD_PATH" with
+  | Some path -> [path]
+  | None ->
+    match Platform.env "HOME" with
+    | Some home -> ["std.lsp", home ++ "/.lishp/std.lsp"]
+    | None -> ["std.lsp"]
+
+first_readable : List String ->{Async, File.FileSystem} Option (String, String)
+let rec first_readable paths =
+  match paths with
+  | [] -> None
+  | [path, ...rest] ->
+    match read_file_option path with
+    | Some text -> Some (path, text)
+    | None -> first_readable rest
+
+load_std :
+  Env ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console}
+  Result String Unit
+let load_std env =
+  match first_readable (std_candidates ()) with
+  | None -> Ok ()
+  | Some (path, text) ->
+    match eval_source env text with
+    | Err message -> Err ("loading " ++ path ++ ": " ++ message)
+    | Ok _ -> Ok ()
+
+run_files :
+  Env ->
+  List String ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console}
+  Result String Unit
+let rec run_files env paths =
+  match paths with
+  | [] -> Ok ()
+  | [path, ...rest] ->
+    match read_file_option path with
+    | None -> Err ("failed to read file: " ++ path)
+    | Some text ->
+      match eval_source env text with
+      | Err message -> Err (path ++ ": " ++ message)
+      | Ok _ -> run_files env rest
+
+/// The environment every command starts from, with `std.lsp` loaded.
+prepare :
+  Unit ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console}
+  Result String Env
+let prepare () =
+  let env = env_new None
+  match load_std env with
+  | Err message -> Err message
+  | Ok () -> Ok env
+
+read_line_option : Unit ->{Async, Terminal.Terminal} Option String
+let read_line_option () =
+  try Some (Terminal.read_line ()) with
+  | Terminal.QuitError -> None
+
+eval_all :
+  Env ->
+  List Value ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console}
+  Unit
+let rec eval_all env forms =
+  match forms with
+  | [] -> ()
+  | [form, ...rest] ->
+    match eval_expr { env = env; value = form } with
+    | Ok value -> Platform.stdout_line (show_value value)
+    | Err message -> Platform.stderr_line ("Error: " ++ message)
+    eval_all env rest
+
+repl_loop :
+  { env : Env; buffer : String } ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console}
+  Unit
+let rec repl_loop state =
+  if String.is_empty state.buffer then
+    Platform.stdout_write "lishp> "
+  else
+    Platform.stdout_write "   ...> "
+  match read_line_option () with
+  | None -> Platform.stdout_line ""
+  | Some line ->
+    let buffer = if String.is_empty state.buffer then line else state.buffer ++ "\n" ++ line
+    match parse_all buffer with
+    | Err Incomplete -> repl_loop { state with buffer = buffer }
+    | Err (Invalid message) ->
+      Platform.stderr_line ("Error: " ++ message)
+      repl_loop { state with buffer = "" }
+    | Ok forms ->
+      eval_all state.env forms
+      repl_loop { state with buffer = "" }
+
+/// `run`: one expression, or the files in one environment.
+run :
+  Option String ->
+  List String ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console; AppError}
+  Unit
+let run selected files =
+  match selected with
+  | Some text ->
+    match prepare () with
+    | Err message -> App.fail message
+    | Ok env ->
+      match eval_text env text with
+      | Ok value -> Platform.stdout_line (show_value value)
+      | Err message -> App.fail message
+  | None ->
+    match files with
+    | [] -> App.fail "either --eval or file paths must be provided"
+    | _ ->
+      match prepare () with
+      | Err message -> App.fail message
+      | Ok env ->
+        match run_files env files with
+        | Ok () -> ()
+        | Err message -> App.fail message
+
+/// The REPL, started by `repl` or when the command line has no arguments.
+repl :
+  Unit ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console; AppError} Unit
+let repl () =
+  match prepare () with
+  | Err message -> App.fail message
+  | Ok env -> repl_loop { env = env; buffer = "" }

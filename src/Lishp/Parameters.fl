@@ -1,0 +1,23 @@
+/// The parameter list of `lambda`, `dambda` and `macro`.
+module Lishp.Parameters exposing (lambda_params)
+
+import Lishp.Value exposing (Value(..), show_value)
+
+parse_params : List Value -> Result String (List String, Option String)
+let rec parse_params values =
+  match values with
+  | [] -> Ok ([], None)
+  | [VSymbol ".", VSymbol name] -> Ok ([], Some name)
+  | [VSymbol ".", ..._] -> Err "a `.` must be followed by one symbol"
+  | [VSymbol name, ...rest] ->
+    match parse_params rest with
+    | Err failure -> Err failure
+    | Ok (params, variadic) -> Ok ([name] ++ params, variadic)
+  | [value, ..._] -> Err ("a parameter must be a symbol, got: " ++ show_value value)
+
+lambda_params : Value -> Result String (List String, Option String)
+let lambda_params params_form =
+  match params_form with
+  | VNil -> parse_params []
+  | VList values -> parse_params values
+  | other -> Err ("expected a list of arguments, got: " ++ show_value other)

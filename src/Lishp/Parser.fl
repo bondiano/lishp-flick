@@ -44,18 +44,13 @@ let numeric_start atom =
 
 unescape : String -> String
 let unescape c =
-  if c == "n" then
-    "\n"
-  else if c == "r" then
-    "\r"
-  else if c == "t" then
-    "\t"
-  else if c == "\\" then
-    "\\"
-  else if c == "\"" then
-    "\""
-  else
-    c
+  match c with
+  | "n" -> "\n"
+  | "r" -> "\r"
+  | "t" -> "\t"
+  | "\\" -> "\\"
+  | "\"" -> "\""
+  | other -> other
 
 flush_word : String -> List Token -> List Token
 let flush_word word tokens = if String.is_empty word then tokens else [TWord word] ++ tokens
@@ -105,72 +100,40 @@ let tokenize source = tokenize_chars (String.chars source) [] ""
 
 keyword : String -> Option Value
 let keyword word =
-  if word == "nil" then
-    Some VNil
-  else if word == "true" then
-    Some (VBool true)
-  else if word == "false" then
-    Some (VBool false)
-  else if word == "def" then
-    Some (VSpecial SDef)
-  else if word == "set!" then
-    Some (VSpecial SSet)
-  else if word == "if" then
-    Some (VSpecial SIf)
-  else if word == "quote" then
-    Some (VSpecial SQuote)
-  else if word == "eval" then
-    Some (VSpecial SEval)
-  else if word == "car" then
-    Some (VSpecial SCar)
-  else if word == "cdr" then
-    Some (VSpecial SCdr)
-  else if word == "cons" then
-    Some (VSpecial SCons)
-  else if word == "do" then
-    Some (VSpecial SDo)
-  else if word == "typeof" then
-    Some (VSpecial STypeOf)
-  else if word == "read" then
-    Some (VSpecial SRead)
-  else if word == "print" then
-    Some (VSpecial SPrint)
-  else if word == "symbol" then
-    Some (VSpecial SSymbol)
-  else if word == "lambda" then
-    Some (VSpecial SLambda)
-  else if word == "λ" then
-    Some (VSpecial SLambda)
-  else if word == "dambda" then
-    Some (VSpecial SDambda)
-  else if word == "macro" then
-    Some (VSpecial SMacro)
-  else if word == "load" then
-    Some (VSpecial SLoad)
-  else if word == "expand-macro" then
-    Some (VSpecial SExpandMacro)
-  else if word == "raise" then
-    Some (VSpecial SRaise)
-  else if word == "_+_" then
-    Some (VOp OAdd)
-  else if word == "_-_" then
-    Some (VOp OSub)
-  else if word == "_*_" then
-    Some (VOp OMul)
-  else if word == "_/_" then
-    Some (VOp ODiv)
-  else if word == "_%_" then
-    Some (VOp OMod)
-  else if word == "_++_" then
-    Some (VOp OConcat)
-  else if word == "_=_" then
-    Some (VPred PEq)
-  else if word == "_<_" then
-    Some (VPred PLt)
-  else if word == "_>_" then
-    Some (VPred PGt)
-  else
-    None
+  match word with
+  | "nil" -> Some VNil
+  | "true" -> Some (VBool true)
+  | "false" -> Some (VBool false)
+  | "def" -> Some (VSpecial SDef)
+  | "set!" -> Some (VSpecial SSet)
+  | "if" -> Some (VSpecial SIf)
+  | "quote" -> Some (VSpecial SQuote)
+  | "eval" -> Some (VSpecial SEval)
+  | "car" -> Some (VSpecial SCar)
+  | "cdr" -> Some (VSpecial SCdr)
+  | "cons" -> Some (VSpecial SCons)
+  | "do" -> Some (VSpecial SDo)
+  | "typeof" -> Some (VSpecial STypeOf)
+  | "read" -> Some (VSpecial SRead)
+  | "print" -> Some (VSpecial SPrint)
+  | "symbol" -> Some (VSpecial SSymbol)
+  | "lambda" -> Some (VSpecial SLambda)
+  | "λ" -> Some (VSpecial SLambda)
+  | "dambda" -> Some (VSpecial SDambda)
+  | "macro" -> Some (VSpecial SMacro)
+  | "load" -> Some (VSpecial SLoad)
+  | "expand-macro" -> Some (VSpecial SExpandMacro)
+  | "raise" -> Some (VSpecial SRaise)
+  | "_+_" -> Some (VOp OAdd)
+  | "_-_" -> Some (VOp OSub)
+  | "_*_" -> Some (VOp OMul)
+  | "_/_" -> Some (VOp ODiv)
+  | "_%_" -> Some (VOp OMod)
+  | "_++_" -> Some (VOp OConcat)
+  | "_=_" -> Some (VPred PEq)
+  | "_<_" -> Some (VPred PLt)
+  | "_>_" -> Some (VPred PGt)
+  | _ -> None
 
 // A word that is not a keyword, a number or a symbol is a parse error.
 classify : String -> Result ParseError Value

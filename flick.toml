@@ -9,3 +9,6 @@ test-dir = "test"
 [build]
 out-dir = "dist"
 emit = "go"
+
+[lint]
+allow = ["FLICK-T055"]

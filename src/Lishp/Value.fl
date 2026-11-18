@@ -196,18 +196,13 @@ let truthy value =
 
 escape_char : String -> String
 let escape_char c =
-  if c == "\n" then
-    "\\n"
-  else if c == "\r" then
-    "\\r"
-  else if c == "\t" then
-    "\\t"
-  else if c == "\\" then
-    "\\\\"
-  else if c == "\"" then
-    "\\\""
-  else
-    c
+  match c with
+  | "\n" -> "\\n"
+  | "\r" -> "\\r"
+  | "\t" -> "\\t"
+  | "\\" -> "\\\\"
+  | "\"" -> "\\\""
+  | other -> other
 
 quote_string : String -> String
 let quote_string text = "\"" ++ String.join "" (List.map escape_char (String.chars text)) ++ "\""
@@ -219,6 +214,9 @@ let show_params fn =
     if List.is_empty fn.params then ". " ++ rest else String.join " " fn.params ++ " . " ++ rest
   | None -> String.join " " fn.params
 
+show_bool : Bool -> String
+let show_bool b = if b then "true" else "false"
+
 rec {
   show_fn : String -> Fn -> String
   let show_fn name fn = "(" ++ name ++ " (" ++ show_params fn ++ ") " ++ show_value fn.body ++ ")"
@@ -229,17 +227,20 @@ rec {
     | VNil -> "nil"
     | VInt n -> BigInt.to_string n
     | VFloat f -> show f
-    | VBool b -> if b then "true" else "false"
+    | VBool b -> show_bool b
     | VString s -> quote_string s
     | VSymbol name -> name
     | VList [] -> "nil"
-    | VList items -> "(" ++ String.join " " (List.map show_value items) ++ ")"
+    | VList items -> show_items items
     | VLambda fn -> show_fn "lambda" fn
     | VDambda fn -> show_fn "dambda" fn
     | VMacro fn -> show_fn "macro" fn
     | VSpecial special -> special_name special
     | VOp op -> op_name op
     | VPred pred -> pred_name pred
+
+  show_items : List Value -> String
+  let show_items items = "(" ++ String.join " " (List.map show_value items) ++ ")"
 }
 
 /// What `print` and `_++_` insert for a value: a string without its quotes.
@@ -256,9 +257,8 @@ rec {
     | (VNil, VNil) -> true
     | (VInt x, VInt y) -> x == y
     | (VFloat x, VFloat y) -> x == y
-    | (VString x, VString y) -> x == y
     | (VBool x, VBool y) -> x == y
-    | (VSymbol x, VSymbol y) -> x == y
+    | (VString x, VString y) | (VSymbol x, VSymbol y) -> x == y
     | (VList xs, VList ys) -> eq_list xs ys
     | (VSpecial x, VSpecial y) -> x == y
     | (VOp x, VOp y) -> x == y

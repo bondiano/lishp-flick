@@ -1,0 +1,105 @@
+/// The binary operators and predicates of Lishp.
+module Lishp.Operators exposing (..)
+
+import Lishp.Value exposing (..)
+
+split_two : List Value -> Option (Value, Value)
+let split_two args =
+  match args with
+  | [a, b] -> Some (a, b)
+  | _ -> None
+
+op_error : Op -> Value -> Value -> Result String Value
+let op_error op left right =
+  Err
+    ("invalid binary operator "
+      ++ op_name op
+      ++ ": cannot apply to types ("
+      ++ type_name left
+      ++ ", "
+      ++ type_name right
+      ++ ") for values ("
+      ++ repr left
+      ++ ", "
+      ++ repr right
+      ++ ")")
+
+pred_error : Pred -> Value -> Value -> Result String Value
+let pred_error pred left right =
+  Err
+    ("invalid binary predicate "
+      ++ pred_name pred
+      ++ ": cannot apply to types ("
+      ++ type_name left
+      ++ ", "
+      ++ type_name right
+      ++ ")")
+
+binary_op : Op -> Value -> Value -> Result String Value
+let binary_op op left right =
+  match op with
+  | OAdd -> add_values op left right
+  | OSub -> sub_values op left right
+  | OMul -> mul_values op left right
+  | ODiv -> divide_values op left right
+  | OMod -> modulo_values op left right
+  | OConcat -> Ok (VString (repr left ++ repr right))
+
+add_values : Op -> Value -> Value -> Result String Value
+let add_values op left right =
+  match (left, right) with
+  | (VInt x, VInt y) -> Ok (VInt (x + y))
+  | (VFloat x, VFloat y) -> Ok (VFloat (x + y))
+  | _ -> op_error op left right
+
+sub_values : Op -> Value -> Value -> Result String Value
+let sub_values op left right =
+  match (left, right) with
+  | (VInt x, VInt y) -> Ok (VInt (x - y))
+  | (VFloat x, VFloat y) -> Ok (VFloat (x - y))
+  | _ -> op_error op left right
+
+mul_values : Op -> Value -> Value -> Result String Value
+let mul_values op left right =
+  match (left, right) with
+  | (VInt x, VInt y) -> Ok (VInt (x * y))
+  | (VFloat x, VFloat y) -> Ok (VFloat (x * y))
+  | _ -> op_error op left right
+
+divide_values : Op -> Value -> Value -> Result String Value
+let divide_values op left right =
+  match (left, right) with
+  | (VInt x, VInt y) ->
+    if y == 0n then
+      Err "division by zero"
+    else if x % y == 0n then
+      Ok (VInt (x / y))
+    else
+      Ok (VFloat (BigInt.to_number x / BigInt.to_number y))
+  | (VFloat x, VFloat y) -> if y == 0.0 then Err "division by zero" else Ok (VFloat (x / y))
+  | (VInt x, VFloat y) ->
+    if y == 0.0 then Err "division by zero" else Ok (VFloat (BigInt.to_number x / y))
+  | (VFloat x, VInt y) ->
+    if y == 0n then Err "division by zero" else Ok (VFloat (x / BigInt.to_number y))
+  | _ -> op_error op left right
+
+modulo_values : Op -> Value -> Value -> Result String Value
+let modulo_values op left right =
+  match (left, right) with
+  | (VInt x, VInt y) -> if y == 0n then Err "division by zero" else Ok (VInt (x % y))
+  | _ -> op_error op left right
+
+apply_pred : Pred -> Value -> Value -> Result String Value
+let apply_pred pred left right =
+  match pred with
+  | PEq -> Ok (VBool (eq_value left right))
+  | PLt ->
+    match (left, right) with
+    | (VInt x, VInt y) -> Ok (VBool (x < y))
+    | (VFloat x, VFloat y) -> Ok (VBool (x < y))
+    | _ -> pred_error pred left right
+  | PGt ->
+    match (left, right) with
+    | (VInt x, VInt y) -> Ok (VBool (x > y))
+    | (VFloat x, VFloat y) -> Ok (VBool (x > y))
+    | _ -> pred_error pred left right

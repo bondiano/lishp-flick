@@ -1,0 +1,32 @@
+/// The command line: `run` evaluates an expression or files, `repl` reads
+/// forms from the terminal. The work itself is in `App.Handlers`.
+module App.Commands exposing (command)
+
+import App.Handlers
+import Cli
+
+run_command :
+  Cli.Command {Host.Environment, Host.Console, Async, Terminal.Terminal, File.FileSystem} {AppError}
+let run_command = cli "run" {
+  description "Run a Lishp expression or files"
+  /// Evaluate this expression and print its value
+  flag eval "e" : Option String
+  /// The files to run, sharing one environment
+  arg files : List String
+  handle fun { eval; files } -> App.Handlers.run eval files
+}
+
+repl_command :
+  Cli.Command {Host.Environment, Host.Console, Async, Terminal.Terminal, File.FileSystem} {AppError}
+let repl_command = cli "repl" {
+  description "Start an interactive read-eval-print loop"
+  handle fun _ -> App.Handlers.repl ()
+}
+
+command :
+  Cli.Command {Host.Environment, Host.Console, Async, Terminal.Terminal, File.FileSystem} {AppError}
+let command = cli "lishp" {
+  description "A Lisp interpreter with lexical closures, macros and eval"
+  subcommand run_command
+  subcommand repl_command
+}

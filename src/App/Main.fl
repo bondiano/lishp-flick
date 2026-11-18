@@ -1,171 +1,20 @@
-/// The command line: `run` evaluates an expression or files, `repl` reads
-/// forms from the terminal, and both start from `std.lsp`.
+/// The entry point: the REPL without arguments, the command line otherwise.
 module App.Main exposing (main)
 
+import App.Commands
+import App.Handlers
 import Cli
 import File
-import Lishp.Eval exposing (..)
-import Lishp.Parser exposing (Incomplete, Invalid, parse_all)
-import Lishp.Value exposing (..)
 import Terminal
-
-/// Where `std.lsp` may be: `LISHP_STD_PATH`, the working directory, the home
-/// directory.
-std_candidates : Unit ->{Host.Environment} List String
-let std_candidates () =
-  match Platform.env "LISHP_STD_PATH" with
-  | Some path -> [path]
-  | None ->
-    match Platform.env "HOME" with
-    | Some home -> ["std.lsp", home ++ "/.lishp/std.lsp"]
-    | None -> ["std.lsp"]
-
-first_readable : List String ->{Async, File.FileSystem} Option (String, String)
-let rec first_readable paths =
-  match paths with
-  | [] -> None
-  | [path, ...rest] ->
-    match read_file_option path with
-    | Some text -> Some (path, text)
-    | None -> first_readable rest
-
-load_std :
-  Env ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console}
-  Result String Unit
-let load_std env =
-  match first_readable (std_candidates ()) with
-  | None -> Ok ()
-  | Some (path, text) ->
-    match eval_source env text with
-    | Err message -> Err ("loading " ++ path ++ ": " ++ message)
-    | Ok _ -> Ok ()
-
-run_files :
-  Env ->
-  List String ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console}
-  Result String Unit
-let rec run_files env paths =
-  match paths with
-  | [] -> Ok ()
-  | [path, ...rest] ->
-    match read_file_option path with
-    | None -> Err ("failed to read file: " ++ path)
-    | Some text ->
-      match eval_source env text with
-      | Err message -> Err (path ++ ": " ++ message)
-      | Ok _ -> run_files env rest
-
-/// The environment every command starts from, with `std.lsp` loaded.
-prepare :
-  Unit ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console}
-  Result String Env
-let prepare () =
-  let env = env_new None
-  match load_std env with
-  | Err message -> Err message
-  | Ok () -> Ok env
-
-read_line_option : Unit ->{Async, Terminal.Terminal} Option String
-let read_line_option () =
-  try Some (Terminal.read_line ()) with
-  | Terminal.QuitError -> None
-
-eval_all :
-  Env ->
-  List Value ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console}
-  Unit
-let rec eval_all env forms =
-  match forms with
-  | [] -> ()
-  | [form, ...rest] ->
-    match eval_expr { env = env; value = form } with
-    | Ok value -> Platform.stdout_line (show_value value)
-    | Err message -> Platform.stderr_line ("Error: " ++ message)
-    eval_all env rest
-
-repl_loop :
-  { env : Env; buffer : String } ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console}
-  Unit
-let rec repl_loop state =
-  if String.is_empty state.buffer then
-    Platform.stdout_write "lishp> "
-  else
-    Platform.stdout_write "   ...> "
-  match read_line_option () with
-  | None -> Platform.stdout_line ""
-  | Some line ->
-    let buffer = if String.is_empty state.buffer then line else state.buffer ++ "\n" ++ line
-    match parse_all buffer with
-    | Err Incomplete -> repl_loop { state with buffer = buffer }
-    | Err (Invalid message) ->
-      Platform.stderr_line ("Error: " ++ message)
-      repl_loop { state with buffer = "" }
-    | Ok forms ->
-      eval_all state.env forms
-      repl_loop { state with buffer = "" }
-
-run_command :
-  Cli.Command {Host.Environment, Host.Console, Async, Terminal.Terminal, File.FileSystem} {AppError}
-let run_command = cli "run" {
-  description "Run a Lishp expression or files"
-  /// Evaluate this expression and print its value
-  flag eval "e" : Option String
-  /// The files to run, sharing one environment
-  arg files : List String
-  handle fun { eval; files } ->
-    match eval with
-    | Some text ->
-      match prepare () with
-      | Err message -> App.fail message
-      | Ok env ->
-        match eval_text env text with
-        | Ok value -> Platform.stdout_line (show_value value)
-        | Err message -> App.fail message
-    | None ->
-      match files with
-      | [] -> App.fail "either --eval or file paths must be provided"
-      | _ ->
-        match prepare () with
-        | Err message -> App.fail message
-        | Ok env ->
-          match run_files env files with
-          | Ok () -> ()
-          | Err message -> App.fail message
-}
-
-repl_command :
-  Cli.Command {Host.Environment, Host.Console, Async, Terminal.Terminal, File.FileSystem} {AppError}
-let repl_command = cli "repl" {
-  description "Start an interactive read-eval-print loop"
-  handle fun _ ->
-    match prepare () with
-    | Err message -> App.fail message
-    | Ok env -> repl_loop { env = env; buffer = "" }
-}
-
-command :
-  Cli.Command {Host.Environment, Host.Console, Async, Terminal.Terminal, File.FileSystem} {AppError}
-let command = cli "lishp" {
-  description "A Lisp interpreter with lexical closures, macros and eval"
-  subcommand run_command
-  subcommand repl_command
-}
-
-start_repl :
-  Unit ->{Host.Environment, Async, Terminal.Terminal, File.FileSystem, Host.Console; AppError} Unit
-let start_repl () =
-  match prepare () with
-  | Err message -> App.fail message
-  | Ok env -> repl_loop { env = env; buffer = "" }
 
 main : Unit ->{Host.Environment, Host.Arguments, Host.Console, Async; AppError} Unit
 let main () = provide File.node {
   provide Terminal.node {
     let args = Platform.args ()
     if List.is_empty args then
-      start_repl ()
+      App.Handlers.repl ()
     else
-      try Cli.run_version "0.1.0" command args with
+      try Cli.run_version "0.1.0" App.Commands.command args with
       | Cli.CliError message -> App.fail message
   }
 }
