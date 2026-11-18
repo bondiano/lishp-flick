@@ -1,0 +1,258 @@
+/// Reads Lishp source into its values: numbers, strings, symbols and lists.
+module Lishp.Parser exposing (..)
+
+import Lishp.Value exposing (Value(..), Special(..), Op(..), Pred(..))
+
+type ParseError = Incomplete | Invalid String
+
+type Token = TLParen | TRParen | TQuote | TString String | TWord String
+
+show_error : ParseError -> String
+let show_error failure =
+  match failure with
+  | Incomplete -> "incomplete expression"
+  | Invalid message -> "parse error: " ++ message
+
+is_space : String -> Bool
+let is_space c = String.is_empty (String.trim c)
+
+is_digit : String -> Bool
+let is_digit c = c >= "0" && c <= "9"
+
+is_digits : List String -> Bool
+let rec is_digits chars =
+  match chars with
+  | [] -> true
+  | [c, ...rest] -> is_digit c && is_digits rest
+
+integer_literal : String -> Bool
+let integer_literal atom =
+  match String.chars atom with
+  | [] -> false
+  | ["-", ...rest] -> not (List.is_empty rest) && is_digits rest
+  | [c, ..._] -> is_digit c && is_digits (String.chars atom)
+
+numeric_start : String -> Bool
+let numeric_start atom =
+  match String.chars atom with
+  | [] -> false
+  | ["-", ...rest] ->
+    match rest with
+    | [] -> false
+    | [d, ..._] -> is_digit d || d == "."
+  | [c, ..._] -> is_digit c || c == "."
+
+unescape : String -> String
+let unescape c =
+  if c == "n" then
+    "\n"
+  else if c == "r" then
+    "\r"
+  else if c == "t" then
+    "\t"
+  else if c == "\\" then
+    "\\"
+  else if c == "\"" then
+    "\""
+  else
+    c
+
+flush_word : String -> List Token -> List Token
+let flush_word word tokens = if String.is_empty word then tokens else [TWord word] ++ tokens
+
+skip_line : List String -> List String
+let rec skip_line chars =
+  match chars with
+  | [] -> []
+  | [c, ...rest] -> if c == "\n" then rest else skip_line rest
+
+read_string : List String -> String -> Result ParseError (String, List String)
+let rec read_string chars text =
+  match chars with
+  | [] -> Err Incomplete
+  | ["\"", ...rest] -> Ok (text, rest)
+  | ["\\", ...rest] ->
+    match rest with
+    | [] -> Err Incomplete
+    | [c, ...more] -> read_string more (text ++ unescape c)
+  | [c, ...rest] -> read_string rest (text ++ c)
+
+tokenize_chars : List String -> List Token -> String -> Result ParseError (List Token)
+let rec tokenize_chars chars tokens word =
+  match chars with
+  | [] -> Ok (List.reverse (flush_word word tokens))
+  | [c, ...rest] ->
+    if c == "(" then
+      tokenize_chars rest ([TLParen] ++ flush_word word tokens) ""
+    else if c == ")" then
+      tokenize_chars rest ([TRParen] ++ flush_word word tokens) ""
+    else if c == "'" then
+      tokenize_chars rest ([TQuote] ++ flush_word word tokens) ""
+    else if c == ";" then
+      let rest_of_line = skip_line rest
+      tokenize_chars rest_of_line (flush_word word tokens) ""
+    else if c == "," || is_space c then
+      tokenize_chars rest (flush_word word tokens) ""
+    else if c == "\"" then
+      match read_string rest "" with
+      | Err failure -> Err failure
+      | Ok (text, after) -> tokenize_chars after ([TString text] ++ flush_word word tokens) ""
+    else
+      tokenize_chars rest tokens (word ++ c)
+
+tokenize : String -> Result ParseError (List Token)
+let tokenize source = tokenize_chars (String.chars source) [] ""
+
+keyword : String -> Option Value
+let keyword word =
+  if word == "nil" then
+    Some VNil
+  else if word == "true" then
+    Some (VBool true)
+  else if word == "false" then
+    Some (VBool false)
+  else if word == "def" then
+    Some (VSpecial SDef)
+  else if word == "set!" then
+    Some (VSpecial SSet)
+  else if word == "if" then
+    Some (VSpecial SIf)
+  else if word == "quote" then
+    Some (VSpecial SQuote)
+  else if word == "eval" then
+    Some (VSpecial SEval)
+  else if word == "car" then
+    Some (VSpecial SCar)
+  else if word == "cdr" then
+    Some (VSpecial SCdr)
+  else if word == "cons" then
+    Some (VSpecial SCons)
+  else if word == "do" then
+    Some (VSpecial SDo)
+  else if word == "typeof" then
+    Some (VSpecial STypeOf)
+  else if word == "read" then
+    Some (VSpecial SRead)
+  else if word == "print" then
+    Some (VSpecial SPrint)
+  else if word == "symbol" then
+    Some (VSpecial SSymbol)
+  else if word == "lambda" then
+    Some (VSpecial SLambda)
+  else if word == "λ" then
+    Some (VSpecial SLambda)
+  else if word == "dambda" then
+    Some (VSpecial SDambda)
+  else if word == "macro" then
+    Some (VSpecial SMacro)
+  else if word == "load" then
+    Some (VSpecial SLoad)
+  else if word == "expand-macro" then
+    Some (VSpecial SExpandMacro)
+  else if word == "raise" then
+    Some (VSpecial SRaise)
+  else if word == "_+_" then
+    Some (VOp OAdd)
+  else if word == "_-_" then
+    Some (VOp OSub)
+  else if word == "_*_" then
+    Some (VOp OMul)
+  else if word == "_/_" then
+    Some (VOp ODiv)
+  else if word == "_%_" then
+    Some (VOp OMod)
+  else if word == "_++_" then
+    Some (VOp OConcat)
+  else if word == "_=_" then
+    Some (VPred PEq)
+  else if word == "_<_" then
+    Some (VPred PLt)
+  else if word == "_>_" then
+    Some (VPred PGt)
+  else
+    None
+
+// A word that is not a keyword, a number or a symbol is a parse error.
+classify : String -> Result ParseError Value
+let classify word =
+  match keyword word with
+  | Some value -> Ok value
+  | None ->
+    if integer_literal word then
+      match BigInt.parse word with
+      | Some n -> Ok (VInt n)
+      | None -> Err (Invalid ("invalid integer: " ++ word))
+    else if numeric_start word && word != "." then
+      match Float.parse word with
+      | Some f -> Ok (VFloat f)
+      | None -> Err (Invalid ("invalid number: " ++ word))
+    else if word == "" then
+      Err (Invalid "empty symbol")
+    else
+      match String.chars word with
+      | [c, ..._] ->
+        if is_digit c then Err (Invalid ("invalid number: " ++ word)) else Ok (VSymbol word)
+      | [] -> Err (Invalid "empty symbol")
+
+rec {
+  parse_items : List Token -> List Value -> Result ParseError (List Value, List Token)
+  let parse_items tokens acc =
+    match tokens with
+    | [] -> Err Incomplete
+    | [TRParen, ...rest] -> Ok (List.reverse acc, rest)
+    | _ ->
+      match parse_expr tokens with
+      | Err failure -> Err failure
+      | Ok (value, rest) -> parse_items rest ([value] ++ acc)
+
+  parse_expr : List Token -> Result ParseError (Value, List Token)
+  let parse_expr tokens =
+    match tokens with
+    | [] -> Err Incomplete
+    | [TRParen, ..._] -> Err (Invalid "unexpected )")
+    | [TLParen, ...rest] ->
+      match parse_items rest [] with
+      | Err failure -> Err failure
+      | Ok (items, remaining) ->
+        match items with
+        | [] -> Ok (VNil, remaining)
+        | _ -> Ok (VList items, remaining)
+    | [TQuote, ...rest] ->
+      match parse_expr rest with
+      | Err failure -> Err failure
+      | Ok (value, remaining) -> Ok (VList [VSpecial SQuote, value], remaining)
+    | [TString text, ...rest] -> Ok (VString text, rest)
+    | [TWord word, ...rest] ->
+      match classify word with
+      | Err failure -> Err failure
+      | Ok value -> Ok (value, rest)
+}
+
+parse_many : List Token -> List Value -> Result ParseError (List Value)
+let rec parse_many tokens acc =
+  match tokens with
+  | [] -> Ok (List.reverse acc)
+  | _ ->
+    match parse_expr tokens with
+    | Err failure -> Err failure
+    | Ok (value, rest) -> parse_many rest ([value] ++ acc)
+
+/// Every expression of the source, in order.
+parse_all : String -> Result ParseError (List Value)
+let parse_all source =
+  match tokenize source with
+  | Err failure -> Err failure
+  | Ok tokens -> parse_many tokens []
+
+/// The first expression of the source, if there is one.
+parse_one : String -> Result ParseError (Option Value)
+let parse_one source =
+  match tokenize source with
+  | Err failure -> Err failure
+  | Ok tokens ->
+    match tokens with
+    | [] -> Ok None
+    | _ ->
+      match parse_expr tokens with
+      | Err failure -> Err failure
+      | Ok (value, _) -> Ok (Some value)

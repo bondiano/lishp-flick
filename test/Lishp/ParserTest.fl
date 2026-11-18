@@ -1,0 +1,66 @@
+module Lishp.ParserTest exposing (tests)
+
+import Lishp.Parser exposing (ParseError(..), parse_all, parse_one)
+import Lishp.Value exposing (Value(..), show_value)
+
+shown : Result ParseError (List Value) -> String
+let shown parsed =
+  match parsed with
+  | Err Incomplete -> "incomplete"
+  | Err (Invalid _) -> "invalid"
+  | Ok values -> String.join "|" (List.map show_value values)
+
+first : Result ParseError (Option Value) -> String
+let first parsed =
+  match parsed with
+  | Err Incomplete -> "incomplete"
+  | Err (Invalid _) -> "invalid"
+  | Ok None -> "none"
+  | Ok (Some value) -> show_value value
+
+tests : List Test.Test
+let tests = [
+  Test.test "numbers, booleans, nil and symbols" (fun () ->
+    Test.equal "42|-7|1.5|true|false|nil|abc" (shown (parse_all "42 -7 1.5 true false nil abc"))
+  ),
+  Test.test "special forms, operators and predicates are values" (fun () ->
+    Test.equal
+      "def|if|lambda|_+_|_++_|_=_|_<_|_>_"
+      (shown (parse_all "def if lambda _+_ _++_ _=_ _<_ _>_"))
+  ),
+  Test.test "lists, nesting and the empty list" (fun () ->
+    Test.all [
+      Test.equal "(1 (2 3))" (shown (parse_all "(1 (2 3))")),
+      Test.equal "nil" (first (parse_one "()")),
+    ]
+  ),
+  Test.test "quote stands for the quote form" (fun () ->
+    Test.equal "(quote x)" (shown (parse_all "'x"))
+  ),
+  Test.test "a string keeps its escapes" (fun () ->
+    Test.equal "\"a\\nb\\t\\\\\"" (shown (parse_all "\"a\\nb\\t\\\\\""))
+  ),
+  Test.test "comments and commas separate expressions" (fun () ->
+    Test.equal "1|2|3" (shown (parse_all "1 ; a comment\n 2, 3"))
+  ),
+  Test.test "an unfinished expression is incomplete" (fun () ->
+    Test.all [
+      Test.equal "incomplete" (shown (parse_all "(+ 1")),
+      Test.equal "incomplete" (shown (parse_all "\"abc")),
+      Test.equal "incomplete" (shown (parse_all "'")),
+    ]
+  ),
+  Test.test "a closing parenthesis or a malformed number is invalid" (fun () ->
+    Test.all [
+      Test.equal "invalid" (shown (parse_all ")")),
+      Test.equal "invalid" (shown (parse_all "1abc")),
+      Test.equal "invalid" (shown (parse_all "1.2.3")),
+    ]
+  ),
+  Test.test "a lone dot is the variadic marker symbol" (fun () ->
+    Test.equal "." (first (parse_one "."))
+  ),
+  Test.test "parse_one reads the first expression and ignores the rest" (fun () ->
+    Test.equal "1" (first (parse_one "1 2 3"))
+  ),
+]

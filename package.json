@@ -1,0 +1,6 @@
+{
+  "name": "lishp-flick",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.16.1"
+}

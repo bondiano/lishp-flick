@@ -1,0 +1,4 @@
+.flick/
+dist/
+node_modules/
+*.iface

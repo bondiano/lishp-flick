@@ -1,0 +1,125 @@
+module Lishp.EvalTest exposing (tests)
+
+import Lishp.Eval exposing (..)
+import Lishp.Value exposing (..)
+import Terminal exposing (Terminal)
+
+/// A terminal that answers the first line `read` asks for.
+fake_terminal : Layer none none {Terminal.Terminal}
+let fake_terminal =
+  Layer.succeed Terminal {
+    columns = fun () -> 80
+    rows = fun () -> 24
+    read_line = fun () -> "42"
+    display = fun _ -> ()
+  }
+
+run : Env -> String ->{Async, Terminal.Terminal, File.FileSystem, Host.Console} String
+let run env source =
+  match eval_text env source with
+  | Ok value -> show_value value
+  | Err message -> "error: " ++ message
+
+tests : List Test.Test
+let tests = [
+  Test.effect_test
+    "operators and predicates on numbers and text"
+    (task {
+      let env = env_new None
+      provide fake_terminal {
+        provide File.node {
+          Test.all [
+            Test.equal "3" (run env "(_+_ 1 2)"),
+            Test.equal "-3" (run env "(_-_ 0 3)"),
+            Test.equal "6" (run env "(_*_ 2 3)"),
+            Test.equal "3" (run env "(_/_ 6 2)"),
+            Test.equal "3.5" (run env "(_/_ 7 2)"),
+            Test.equal "1" (run env "(_%_ 7 3)"),
+            Test.equal "\"a1\"" (run env "(_++_ \"a\" 1)"),
+            Test.equal "true" (run env "(_<_ 1 2)"),
+            Test.equal "true" (run env "(_=_ '(1 2) '(1 2))"),
+            Test.equal "error: division by zero" (run env "(_/_ 1 0)"),
+          ]
+          |> Test.expect
+        }
+      }
+    }),
+  Test.effect_test
+    "defines, closures, currying and variadic parameters"
+    (task {
+      let env = env_new None
+      provide fake_terminal {
+        provide File.node {
+          Test.all [
+            Test.equal "nil" (run env "(def add (lambda (a b) (_+_ a b)))"),
+            Test.equal "3" (run env "((add 1) 2)"),
+            Test.equal "42" (run env "((lambda () 42))"),
+            Test.equal "(2 3)" (run env "((lambda (a . rest) rest) 1 2 3)"),
+            Test.equal
+              "2"
+              (run env "(def n 0) (def inc (lambda () (set! n (_+_ n 1)))) (inc) (inc) n"),
+            Test.equal
+              "2"
+              (run
+                env
+                "(def make (lambda () (do (def k 0) (lambda () (do (set! k (_+_ k 1)) k))))) (def c (make)) (c) (c)"),
+          ]
+          |> Test.expect
+        }
+      }
+    }),
+  Test.effect_test
+    "macros expand in the environment of the call"
+    (task {
+      let env = env_new None
+      provide fake_terminal {
+        provide File.node {
+          Test.all [
+            Test.equal "nil" (run env "(def unless (macro (c a b) (if c b a)))"),
+            Test.equal "1" (run env "(unless false 1 2)"),
+            Test.equal "1" (run env "(expand-macro (unless false 1 2))"),
+            Test.equal
+              "true"
+              (run
+                env
+                "(def my-and (macro (a b) (cons 'if (cons a (cons b (cons false nil)))))) (my-and 1 true)"),
+          ]
+          |> Test.expect
+        }
+      }
+    }),
+  Test.effect_test
+    "quote, eval, typeof, cons, car, cdr, symbol and read"
+    (task {
+      let env = env_new None
+      provide fake_terminal {
+        provide File.node {
+          Test.all [
+            Test.equal "(1 2)" (run env "(quote (1 2))"),
+            Test.equal "3" (run env "(eval '(_+_ 1 2))"),
+            Test.equal "\"integer\"" (run env "(typeof 1)"),
+            Test.equal "\"lambda\"" (run env "(typeof (lambda () 1))"),
+            Test.equal "(1)" (run env "(cons 1 nil)"),
+            Test.equal "1" (run env "(car (cons 1 nil))"),
+            Test.equal "nil" (run env "(cdr (cons 1 nil))"),
+            Test.equal "abc" (run env "(symbol \"abc\")"),
+            Test.equal "42" (run env "(read)"),
+            Test.equal "error: cannot get car of nil" (run env "(car nil)"),
+            Test.equal "error: \"boom\"" (run env "(raise \"boom\")"),
+          ]
+          |> Test.expect
+        }
+      }
+    }),
+  Test.effect_test
+    "a dambda sees the environment of its call"
+    (task {
+      let env = env_new None
+      provide fake_terminal {
+        provide File.node {
+          Test.equal "5" (run env "(def y 10) (def f (dambda () y)) (def g (lambda (y) (f))) (g 5)")
+          |> Test.expect
+        }
+      }
+    }),
+]

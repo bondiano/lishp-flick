@@ -1,0 +1,274 @@
+/// The values a Lishp program computes, and the environments closures keep.
+module Lishp.Value exposing (..)
+
+type Value =
+  | VNil
+  | VInt BigInt
+  | VFloat Float
+  | VBool Bool
+  | VString String
+  | VSymbol String
+  | VList (List Value)
+  | VLambda Fn
+  | VDambda Fn
+  | VMacro Fn
+  | VSpecial Special
+  | VOp Op
+  | VPred Pred
+
+/// A function: its parameters, its body and, for a lexically scoped one, the
+/// environment it was built in.
+type alias Fn = { params : List String; rest : Option String; body : Value; env : Option Env }
+
+/// A frame of bindings and the chain it looks up through.
+type Env = Env { frame : Ref (List (String, Value)); parent : Option Env }
+
+type Special =
+  | SDef
+  | SSet
+  | SIf
+  | SQuote
+  | SEval
+  | SCar
+  | SCdr
+  | SCons
+  | SDo
+  | STypeOf
+  | SRead
+  | SPrint
+  | SSymbol
+  | SLambda
+  | SDambda
+  | SMacro
+  | SLoad
+  | SRaise
+  | SExpandMacro
+
+type Op = OAdd | OSub | OMul | ODiv | OMod | OConcat
+
+type Pred = PEq | PLt | PGt
+
+pair_name : (String, a) -> String
+let pair_name pair =
+  match pair with
+  | (name, _) -> name
+
+pair_value : (String, a) -> a
+let pair_value pair =
+  match pair with
+  | (_, value) -> value
+
+assoc_get : String -> List (String, a) -> Option a
+let rec assoc_get name pairs =
+  match pairs with
+  | [] -> None
+  | [pair, ...rest] ->
+    if pair_name pair == name then Some (pair_value pair) else assoc_get name rest
+
+/// `name` bound to `value`: the first binding of the name replaced, or a new one.
+assoc_put : String -> a -> List (String, a) -> List (String, a)
+let rec assoc_put name value pairs =
+  match pairs with
+  | [] -> [(name, value)]
+  | [pair, ...rest] ->
+    if pair_name pair == name then [(name, value)] ++ rest else [pair] ++ assoc_put name value rest
+
+assoc_remove : String -> List (String, a) -> List (String, a)
+let assoc_remove name pairs = List.filter (fun pair -> pair_name pair != name) pairs
+
+/// The value of a list: the empty list is `nil`.
+list_value : List Value -> Value
+let list_value items =
+  match items with
+  | [] -> VNil
+  | _ -> VList items
+
+env_new : Option Env ->{} Env
+let env_new parent = Env { frame = Ref.make []; parent = parent }
+
+env_define : Env -> String -> Value ->{} Unit
+let env_define env name value =
+  match env with
+  | Env e -> ignore (Ref.modify e.frame (fun pairs -> ((), assoc_put name value pairs)))
+
+env_get : Env -> String ->{} Option Value
+let rec env_get env name =
+  match env with
+  | Env e ->
+    match assoc_get name (Ref.get e.frame) with
+    | Some value -> Some value
+    | None ->
+      match e.parent with
+      | Some parent -> env_get parent name
+      | None -> None
+
+env_contains : Env -> String ->{} Bool
+let rec env_contains env name =
+  match env with
+  | Env e ->
+    if List.any (fun pair -> pair_name pair == name) (Ref.get e.frame) then
+      true
+    else
+      match e.parent with
+      | Some parent -> env_contains parent name
+      | None -> false
+
+env_set : Env -> String -> Value ->{} Result String Unit
+let rec env_set env name value =
+  match env with
+  | Env e ->
+    if List.any (fun pair -> pair_name pair == name) (Ref.get e.frame) then
+      let _ = Ref.modify e.frame (fun pairs -> ((), assoc_put name value pairs))
+      Ok ()
+    else
+      match e.parent with
+      | Some parent -> env_set parent name value
+      | None -> Err ("cannot set undefined variable: " ++ name)
+
+env_remove : Env -> String ->{} Unit
+let env_remove env name =
+  match env with
+  | Env e -> ignore (Ref.modify e.frame (fun pairs -> ((), assoc_remove name pairs)))
+
+special_name : Special -> String
+let special_name special =
+  match special with
+  | SDef -> "def"
+  | SSet -> "set!"
+  | SIf -> "if"
+  | SQuote -> "quote"
+  | SEval -> "eval"
+  | SCar -> "car"
+  | SCdr -> "cdr"
+  | SCons -> "cons"
+  | SDo -> "do"
+  | STypeOf -> "typeof"
+  | SRead -> "read"
+  | SPrint -> "print"
+  | SSymbol -> "symbol"
+  | SLambda -> "lambda"
+  | SDambda -> "dambda"
+  | SMacro -> "macro"
+  | SLoad -> "load"
+  | SRaise -> "raise"
+  | SExpandMacro -> "expand-macro"
+
+op_name : Op -> String
+let op_name op =
+  match op with
+  | OAdd -> "_+_"
+  | OSub -> "_-_"
+  | OMul -> "_*_"
+  | ODiv -> "_/_"
+  | OMod -> "_%_"
+  | OConcat -> "_++_"
+
+pred_name : Pred -> String
+let pred_name pred =
+  match pred with
+  | PEq -> "_=_"
+  | PLt -> "_<_"
+  | PGt -> "_>_"
+
+type_name : Value -> String
+let type_name value =
+  match value with
+  | VInt _ -> "integer"
+  | VFloat _ -> "double"
+  | VString _ -> "string"
+  | VBool _ -> "boolean"
+  | VLambda _ -> "lambda"
+  | VDambda _ -> "dambda"
+  | VMacro _ -> "macro"
+  | VNil -> "list"
+  | VList _ -> "list"
+  | VSymbol _ -> "symbol"
+  | VSpecial _ -> "symbol"
+  | VOp _ -> "symbol"
+  | VPred _ -> "symbol"
+
+truthy : Value -> Bool
+let truthy value =
+  match value with
+  | VBool false -> false
+  | VNil -> false
+  | _ -> true
+
+escape_char : String -> String
+let escape_char c =
+  if c == "\n" then
+    "\\n"
+  else if c == "\r" then
+    "\\r"
+  else if c == "\t" then
+    "\\t"
+  else if c == "\\" then
+    "\\\\"
+  else if c == "\"" then
+    "\\\""
+  else
+    c
+
+quote_string : String -> String
+let quote_string text = "\"" ++ String.join "" (List.map escape_char (String.chars text)) ++ "\""
+
+show_params : Fn -> String
+let show_params fn =
+  match fn.rest with
+  | Some rest ->
+    if List.is_empty fn.params then ". " ++ rest else String.join " " fn.params ++ " . " ++ rest
+  | None -> String.join " " fn.params
+
+rec {
+  show_fn : String -> Fn -> String
+  let show_fn name fn = "(" ++ name ++ " (" ++ show_params fn ++ ") " ++ show_value fn.body ++ ")"
+
+  show_value : Value -> String
+  let show_value value =
+    match value with
+    | VNil -> "nil"
+    | VInt n -> BigInt.to_string n
+    | VFloat f -> show f
+    | VBool b -> if b then "true" else "false"
+    | VString s -> quote_string s
+    | VSymbol name -> name
+    | VList [] -> "nil"
+    | VList items -> "(" ++ String.join " " (List.map show_value items) ++ ")"
+    | VLambda fn -> show_fn "lambda" fn
+    | VDambda fn -> show_fn "dambda" fn
+    | VMacro fn -> show_fn "macro" fn
+    | VSpecial special -> special_name special
+    | VOp op -> op_name op
+    | VPred pred -> pred_name pred
+}
+
+/// What `print` and `_++_` insert for a value: a string without its quotes.
+repr : Value -> String
+let repr value =
+  match value with
+  | VString s -> s
+  | _ -> show_value value
+
+rec {
+  eq_value : Value -> Value -> Bool
+  let eq_value a b =
+    match (a, b) with
+    | (VNil, VNil) -> true
+    | (VInt x, VInt y) -> x == y
+    | (VFloat x, VFloat y) -> x == y
+    | (VString x, VString y) -> x == y
+    | (VBool x, VBool y) -> x == y
+    | (VSymbol x, VSymbol y) -> x == y
+    | (VList xs, VList ys) -> eq_list xs ys
+    | (VSpecial x, VSpecial y) -> x == y
+    | (VOp x, VOp y) -> x == y
+    | (VPred x, VPred y) -> x == y
+    | _ -> false
+
+  eq_list : List Value -> List Value -> Bool
+  let eq_list xs ys =
+    match (xs, ys) with
+    | ([], []) -> true
+    | ([x, ...xrest], [y, ...yrest]) -> eq_value x y && eq_list xrest yrest
+    | _ -> false
+}

@@ -1,0 +1,549 @@
+/// Evaluates Lishp values: the environment, the special forms, the operators
+/// and macro expansion.
+module Lishp.Eval exposing (..)
+
+import File
+import Lishp.Parser exposing (parse_all, parse_one, show_error)
+import Lishp.Value exposing (..)
+import Terminal
+
+type alias EvalRequest = { env : Env; value : Value }
+type alias HeadRequest = { env : Env; head : Value; args : List Value }
+type alias ArgsRequest = { caller : Env; args : List Value }
+type alias ApplyRequest = {
+  caller : Env
+  env : Env
+  params : List String
+  rest : Option String
+  body : Value
+  args : List Value
+}
+type alias FormsRequest = { env : Env; forms : List Value }
+type alias SpecialRequest = { env : Env; form : Special; args : List Value }
+type alias MacroRequest = {
+  env : Env
+  params : List String
+  rest : Option String
+  body : Value
+  args : List Value
+}
+type alias ExpandRequest = { env : Env; value : Value }
+
+split_two : List Value -> Option (Value, Value)
+let split_two args =
+  match args with
+  | [a, b] -> Some (a, b)
+  | _ -> None
+
+op_error : Op -> Value -> Value -> Result String Value
+let op_error op left right =
+  Err
+    ("invalid binary operator "
+      ++ op_name op
+      ++ ": cannot apply to types ("
+      ++ type_name left
+      ++ ", "
+      ++ type_name right
+      ++ ") for values ("
+      ++ repr left
+      ++ ", "
+      ++ repr right
+      ++ ")")
+
+pred_error : Pred -> Value -> Value -> Result String Value
+let pred_error pred left right =
+  Err
+    ("invalid binary predicate "
+      ++ pred_name pred
+      ++ ": cannot apply to types ("
+      ++ type_name left
+      ++ ", "
+      ++ type_name right
+      ++ ")")
+
+binary_op : Op -> Value -> Value -> Result String Value
+let binary_op op left right =
+  match op with
+  | OAdd ->
+    match (left, right) with
+    | (VInt x, VInt y) -> Ok (VInt (x + y))
+    | (VFloat x, VFloat y) -> Ok (VFloat (x + y))
+    | _ -> op_error op left right
+  | OSub ->
+    match (left, right) with
+    | (VInt x, VInt y) -> Ok (VInt (x - y))
+    | (VFloat x, VFloat y) -> Ok (VFloat (x - y))
+    | _ -> op_error op left right
+  | OMul ->
+    match (left, right) with
+    | (VInt x, VInt y) -> Ok (VInt (x * y))
+    | (VFloat x, VFloat y) -> Ok (VFloat (x * y))
+    | _ -> op_error op left right
+  | ODiv ->
+    match (left, right) with
+    | (VInt x, VInt y) ->
+      if y == 0n then
+        Err "division by zero"
+      else if x % y == 0n then
+        Ok (VInt (x / y))
+      else
+        Ok (VFloat (BigInt.to_number x / BigInt.to_number y))
+    | (VFloat x, VFloat y) -> if y == 0.0 then Err "division by zero" else Ok (VFloat (x / y))
+    | (VInt x, VFloat y) ->
+      if y == 0.0 then Err "division by zero" else Ok (VFloat (BigInt.to_number x / y))
+    | (VFloat x, VInt y) ->
+      if y == 0n then Err "division by zero" else Ok (VFloat (x / BigInt.to_number y))
+    | _ -> op_error op left right
+  | OMod ->
+    match (left, right) with
+    | (VInt x, VInt y) -> if y == 0n then Err "division by zero" else Ok (VInt (x % y))
+    | _ -> op_error op left right
+  | OConcat -> Ok (VString (repr left ++ repr right))
+
+apply_pred : Pred -> Value -> Value -> Result String Value
+let apply_pred pred left right =
+  match pred with
+  | PEq -> Ok (VBool (eq_value left right))
+  | PLt ->
+    match (left, right) with
+    | (VInt x, VInt y) -> Ok (VBool (x < y))
+    | (VFloat x, VFloat y) -> Ok (VBool (x < y))
+    | _ -> pred_error pred left right
+  | PGt ->
+    match (left, right) with
+    | (VInt x, VInt y) -> Ok (VBool (x > y))
+    | (VFloat x, VFloat y) -> Ok (VBool (x > y))
+    | _ -> pred_error pred left right
+
+parse_params : List Value -> Result String (List String, Option String)
+let rec parse_params values =
+  match values with
+  | [] -> Ok ([], None)
+  | [VSymbol ".", VSymbol name] -> Ok ([], Some name)
+  | [VSymbol ".", ..._] -> Err "a `.` must be followed by one symbol"
+  | [VSymbol name, ...rest] ->
+    match parse_params rest with
+    | Err failure -> Err failure
+    | Ok (params, variadic) -> Ok ([name] ++ params, variadic)
+  | [value, ..._] -> Err ("a parameter must be a symbol, got: " ++ show_value value)
+
+lambda_params : Value -> Result String (List String, Option String)
+let lambda_params params_form =
+  match params_form with
+  | VNil -> parse_params []
+  | VList values -> parse_params values
+  | other -> Err ("expected a list of arguments, got: " ++ show_value other)
+
+read_file_option : String ->{Async, File.FileSystem} Option String
+let read_file_option path =
+  try Some (File.read_text path) with
+  | File.ReadError _ -> None
+
+save_bindings : Env -> List String ->{} List (String, Option Value)
+let rec save_bindings env names =
+  match names with
+  | [] -> []
+  | [name, ...rest] -> [(name, env_get env name)] ++ save_bindings env rest
+
+bind_params : Env -> List String -> List Value ->{} Unit
+let rec bind_params env params args =
+  match (params, args) with
+  | ([param, ...prest], [arg, ...arest]) ->
+    env_define env param arg
+    bind_params env prest arest
+  | _ -> ()
+
+env_restore : Env -> List (String, Option Value) ->{} Unit
+let rec env_restore env saved =
+  match saved with
+  | [] -> ()
+  | [(name, old), ...rest] ->
+    match old with
+    | Some value -> env_define env name value
+    | None -> env_remove env name
+    env_restore env rest
+
+rec {
+  eval_expr :
+    EvalRequest ->{Async, Terminal.Terminal, File.FileSystem, Host.Console} Result String Value
+  let eval_expr req =
+    match req.value with
+    | VSymbol name ->
+      match env_get req.env name with
+      | Some value -> Ok value
+      | None -> Err ("undefined variable: " ++ name)
+    | VList [] -> Err "cannot evaluate empty list"
+    | VList [head, ...tail] ->
+      match head with
+      | VSymbol name ->
+        match env_get req.env name with
+        | Some (VMacro macro) ->
+          match
+            expand_call {
+              env = req.env
+              params = macro.params
+              rest = macro.rest
+              body = macro.body
+              args = tail
+            }
+          with
+          | Err failure -> Err failure
+          | Ok expanded -> eval_expr { env = req.env; value = expanded }
+        | _ -> eval_head { env = req.env; head = head; args = tail }
+      | _ -> eval_head { env = req.env; head = head; args = tail }
+    | _ -> Ok req.value
+
+  eval_head :
+    HeadRequest ->{Async, Terminal.Terminal, File.FileSystem, Host.Console} Result String Value
+  let eval_head req =
+    match eval_expr { env = req.env; value = req.head } with
+    | Err failure -> Err failure
+    | Ok head_value ->
+      match head_value with
+      | VOp op ->
+        match split_two req.args with
+        | None -> Err ("wrong number of arguments for " ++ op_name op)
+        | Some (a, b) ->
+          match eval_expr { env = req.env; value = a } with
+          | Err failure -> Err failure
+          | Ok av ->
+            match eval_expr { env = req.env; value = b } with
+            | Err failure -> Err failure
+            | Ok bv -> binary_op op av bv
+      | VPred pred ->
+        match split_two req.args with
+        | None -> Err ("wrong number of arguments for " ++ pred_name pred)
+        | Some (a, b) ->
+          match eval_expr { env = req.env; value = a } with
+          | Err failure -> Err failure
+          | Ok av ->
+            match eval_expr { env = req.env; value = b } with
+            | Err failure -> Err failure
+            | Ok bv -> apply_pred pred av bv
+      | VSpecial form -> special { env = req.env; form = form; args = req.args }
+      | VLambda fn ->
+        match fn.env with
+        | Some closure_env ->
+          let call_env = env_new (Some closure_env)
+          apply_fn {
+            caller = req.env
+            env = call_env
+            params = fn.params
+            rest = fn.rest
+            body = fn.body
+            args = req.args
+          }
+        | None -> Err "a lambda has no environment"
+      | VDambda fn ->
+        let call_env = env_new (Some req.env)
+        apply_fn {
+          caller = req.env
+          env = call_env
+          params = fn.params
+          rest = fn.rest
+          body = fn.body
+          args = req.args
+        }
+      | _ -> Err ("cannot call " ++ show_value head_value ++ " as a function")
+
+  eval_args :
+    ArgsRequest ->{Async, Terminal.Terminal, File.FileSystem, Host.Console}
+    Result String (List Value)
+  let eval_args req =
+    match req.args with
+    | [] -> Ok []
+    | [arg, ...rest] ->
+      match eval_expr { env = req.caller; value = arg } with
+      | Err failure -> Err failure
+      | Ok value ->
+        match eval_args { req with args = rest } with
+        | Err failure -> Err failure
+        | Ok values -> Ok ([value] ++ values)
+
+  apply_fn :
+    ApplyRequest ->{Async, Terminal.Terminal, File.FileSystem, Host.Console} Result String Value
+  let apply_fn req =
+    match req.args with
+    | [] ->
+      match req.params with
+      | [] ->
+        match req.rest with
+        | Some rest ->
+          env_define req.env rest VNil
+          eval_expr { env = req.env; value = req.body }
+        | None -> eval_expr { env = req.env; value = req.body }
+      | _ ->
+        Ok (VLambda { params = req.params; rest = req.rest; body = req.body; env = Some req.env })
+    | [arg, ...more] ->
+      match req.params with
+      | [param, ...params] ->
+        match eval_expr { env = req.caller; value = arg } with
+        | Err failure -> Err failure
+        | Ok value ->
+          env_define req.env param value
+          apply_fn { req with params = params; args = more }
+      | [] ->
+        match req.rest with
+        | Some rest ->
+          match eval_args { caller = req.caller; args = req.args } with
+          | Err failure -> Err failure
+          | Ok values ->
+            env_define req.env rest (list_value values)
+            eval_expr { env = req.env; value = req.body }
+        | None -> Err ("too many arguments: " ++ show (List.length req.args) ++ " extra")
+
+  do_forms :
+    FormsRequest ->{Async, Terminal.Terminal, File.FileSystem, Host.Console} Result String Value
+  let do_forms req =
+    match req.forms with
+    | [] -> Ok VNil
+    | [form, ...rest] ->
+      match eval_expr { env = req.env; value = form } with
+      | Err failure -> Err failure
+      | Ok value ->
+        match rest with
+        | [] -> Ok value
+        | _ -> do_forms { req with forms = rest }
+
+  special :
+    SpecialRequest ->{Async, Terminal.Terminal, File.FileSystem, Host.Console} Result String Value
+  let special req =
+    match req.form with
+    | SDef ->
+      match req.args with
+      | [name_value, value_form] ->
+        match name_value with
+        | VSymbol name ->
+          match eval_expr { env = req.env; value = value_form } with
+          | Err failure -> Err failure
+          | Ok value ->
+            env_define req.env name value
+            match value with
+            | VLambda fn ->
+              match fn.env with
+              | Some closure_env -> env_define closure_env name value
+              | None -> ()
+            | _ -> ()
+            Ok VNil
+        | _ -> Err "def expects a symbol"
+      | _ -> Err "def expects a name and a value"
+    | SSet ->
+      match req.args with
+      | [name_value, value_form] ->
+        match name_value with
+        | VSymbol name ->
+          if env_contains req.env name then
+            match eval_expr { env = req.env; value = value_form } with
+            | Err failure -> Err failure
+            | Ok value ->
+              match env_set req.env name value with
+              | Err failure -> Err failure
+              | Ok _ -> Ok VNil
+          else
+            Err ("undefined variable: " ++ name)
+        | _ -> Err "set! expects a symbol"
+      | _ -> Err "set! expects a name and a value"
+    | SIf ->
+      match req.args with
+      | [condition, then_form] ->
+        match eval_expr { env = req.env; value = condition } with
+        | Err failure -> Err failure
+        | Ok value ->
+          if truthy value then eval_expr { env = req.env; value = then_form } else Ok VNil
+      | [condition, then_form, else_form] ->
+        match eval_expr { env = req.env; value = condition } with
+        | Err failure -> Err failure
+        | Ok value ->
+          if truthy value then
+            eval_expr { env = req.env; value = then_form }
+          else
+            eval_expr { env = req.env; value = else_form }
+      | _ -> Err "if expects a condition, a then and an else"
+    | SQuote ->
+      match req.args with
+      | [value] -> Ok value
+      | _ -> Err "quote expects one expression"
+    | SEval ->
+      match req.args with
+      | [form] ->
+        match eval_expr { env = req.env; value = form } with
+        | Err failure -> Err failure
+        | Ok value -> eval_expr { env = req.env; value = value }
+      | _ -> Err "eval expects one expression"
+    | SCar ->
+      match req.args with
+      | [form] ->
+        match eval_expr { env = req.env; value = form } with
+        | Err failure -> Err failure
+        | Ok VNil -> Err "cannot get car of nil"
+        | Ok (VList [head, ..._]) -> Ok head
+        | Ok other -> Ok other
+      | _ -> Err "car expects one argument"
+    | SCdr ->
+      match req.args with
+      | [form] ->
+        match eval_expr { env = req.env; value = form } with
+        | Err failure -> Err failure
+        | Ok VNil -> Err "cannot get cdr of nil"
+        | Ok (VList [_, ...rest]) -> Ok (list_value rest)
+        | Ok _ -> Ok VNil
+      | _ -> Err "cdr expects one argument"
+    | SCons ->
+      match req.args with
+      | [head_form, tail_form] ->
+        match eval_expr { env = req.env; value = head_form } with
+        | Err failure -> Err failure
+        | Ok head ->
+          match eval_expr { env = req.env; value = tail_form } with
+          | Err failure -> Err failure
+          | Ok VNil -> Ok (VList [head])
+          | Ok (VList items) -> Ok (VList ([head] ++ items))
+          | Ok other -> Err ("expected list, got: " ++ show_value other)
+      | _ -> Err "cons expects two arguments"
+    | SDo -> do_forms { env = req.env; forms = req.args }
+    | STypeOf ->
+      match req.args with
+      | [form] ->
+        match eval_expr { env = req.env; value = form } with
+        | Err failure -> Err failure
+        | Ok value -> Ok (VString (type_name value))
+      | _ -> Err "typeof expects one argument"
+    | SRead ->
+      let line =
+        try Terminal.read_line () with
+        | Terminal.QuitError -> ""
+      match parse_one line with
+      | Err failure -> Err (show_error failure)
+      | Ok None -> Ok VNil
+      | Ok (Some value) -> Ok value
+    | SPrint ->
+      match req.args with
+      | [form] ->
+        match eval_expr { env = req.env; value = form } with
+        | Err failure -> Err failure
+        | Ok value ->
+          Platform.stdout_line (show_value value)
+          Ok value
+      | _ -> Err "print expects one argument"
+    | SSymbol ->
+      match req.args with
+      | [form] ->
+        match eval_expr { env = req.env; value = form } with
+        | Err failure -> Err failure
+        | Ok (VString text) -> Ok (VSymbol text)
+        | Ok _ -> Err "symbol expects a string"
+      | _ -> Err "symbol expects one argument"
+    | SLambda ->
+      match req.args with
+      | [params_form, body] ->
+        match lambda_params params_form with
+        | Err failure -> Err failure
+        | Ok (params, rest) ->
+          Ok (VLambda { params = params; rest = rest; body = body; env = Some req.env })
+      | _ -> Err "lambda expects arguments and a body"
+    | SDambda ->
+      match req.args with
+      | [params_form, body] ->
+        match lambda_params params_form with
+        | Err failure -> Err failure
+        | Ok (params, rest) ->
+          Ok (VDambda { params = params; rest = rest; body = body; env = None })
+      | _ -> Err "dambda expects arguments and a body"
+    | SMacro ->
+      match req.args with
+      | [params_form, body] ->
+        match lambda_params params_form with
+        | Err failure -> Err failure
+        | Ok (params, rest) -> Ok (VMacro { params = params; rest = rest; body = body; env = None })
+      | _ -> Err "macro expects arguments and a body"
+    | SLoad ->
+      match req.args with
+      | [form] ->
+        match eval_expr { env = req.env; value = form } with
+        | Err failure -> Err failure
+        | Ok (VString path) ->
+          match read_file_option path with
+          | None -> Err ("failed to read file: " ++ path)
+          | Some text ->
+            match parse_all text with
+            | Err failure -> Err (show_error failure)
+            | Ok forms -> do_forms { env = req.env; forms = forms }
+        | Ok other -> Err ("load expects a string path, got: " ++ show_value other)
+      | _ -> Err "load expects one path"
+    | SExpandMacro ->
+      match req.args with
+      | [value] -> expand_loop { env = req.env; value = value }
+      | _ -> Err "expand-macro expects one expression"
+    | SRaise ->
+      match req.args with
+      | [form] ->
+        match eval_expr { env = req.env; value = form } with
+        | Err failure -> Err failure
+        | Ok value -> Err (show_value value)
+      | _ -> Err "raise expects one argument"
+
+  expand_call :
+    MacroRequest ->{Async, Terminal.Terminal, File.FileSystem, Host.Console} Result String Value
+  let expand_call req =
+    let fixed = List.length req.params
+    let given = List.length req.args
+    if given < fixed
+      || (
+        match req.rest with
+        | Some _ -> false
+        | None -> given != fixed
+      ) then
+      Err ("wrong number of arguments for macro: expected " ++ show fixed ++ ", got " ++ show given)
+    else
+      let names =
+        match req.rest with
+        | Some rest -> req.params ++ [rest]
+        | None -> req.params
+      let saved = save_bindings req.env names
+      let _ = bind_params req.env req.params req.args
+      let _ =
+        match req.rest with
+        | Some rest -> env_define req.env rest (list_value (List.drop fixed req.args))
+        | None -> ()
+      match eval_expr { env = req.env; value = req.body } with
+      | Err failure ->
+        env_restore req.env saved
+        Err failure
+      | Ok expanded ->
+        env_restore req.env saved
+        Ok expanded
+
+  expand_loop :
+    ExpandRequest ->{Async, Terminal.Terminal, File.FileSystem, Host.Console} Result String Value
+  let expand_loop req =
+    match req.value with
+    | VList [VSymbol name, ...args] ->
+      match env_get req.env name with
+      | Some (VMacro macro) ->
+        match
+          expand_call {
+            env = req.env
+            params = macro.params
+            rest = macro.rest
+            body = macro.body
+            args = args
+          }
+        with
+        | Err failure -> Err failure
+        | Ok expanded -> expand_loop { env = req.env; value = expanded }
+      | _ -> Ok req.value
+    | _ -> Ok req.value
+}
+
+/// Evaluates every expression of `source` in `env`, giving the last value.
+eval_source :
+  Env -> String ->{Async, Terminal.Terminal, File.FileSystem, Host.Console} Result String Value
+let eval_source env source =
+  match parse_all source with
+  | Err failure -> Err (show_error failure)
+  | Ok forms -> do_forms { env = env; forms = forms }
+
+/// Evaluates `source` and gives the last value, `VNil` when it is empty.
+eval_text :
+  Env -> String ->{Async, Terminal.Terminal, File.FileSystem, Host.Console} Result String Value
+let eval_text env source = eval_source env source
